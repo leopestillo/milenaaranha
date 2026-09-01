@@ -1,0 +1,473 @@
+---
+title: "Milena"
+author: "Leonardo"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+# Configurações globais do documento
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+INSPEÇÃO DOS DADOS
+
+```{r dados}
+# 1.1 Carregamento de Pacotes
+pacotes <- c("tidyverse", "psych", "lavaan", "semTools", 
+             "blavaan", "qgraph", "bootnet", "MVN", "readxl")
+
+lapply(pacotes, require, character.only = TRUE)
+
+# 1.2 Importação e Preparação
+df <- read_excel("bancodedados.xlsx")
+
+#Verificação estrutural do objeto
+# A saída esperada deve incluir "tbl_df", "tbl" e "data.frame"
+class(df)
+
+# Seleção do subset de itens da escala e variáveis externas para validação
+df_escala <- df %>%
+  select(q01, q02_rev, q03_rev, q04, q05, q06, q07, q08, q09, 
+         q10, q11, q12, q13_rev, q14_rev)
+
+# Inversão matemática dos itens reversos (Escala Likert de 1 a 7)
+# Fórmula: Max + Min - Escore (7 + 1 - x = 8 - x)
+df_escala <- df_escala %>%
+  mutate(across(c(q02_rev, q03_rev, q13_rev, q14_rev), ~ 8 - .))
+
+# 1.3 Análise Descritiva e Pressupostos Multivariados
+# Estatísticas descritivas básicas (média, desvio padrão, assimetria, curtose)
+descritivas <- psych::describe(df_escala)
+print(descritivas)
+
+# Avaliação da normalidade multivariada (Teste de Mardia)
+# Essencial para justificar o uso de estimadores robustos na CFA
+normalidade_multivariada <- psych::mardia(df_escala, plot = FALSE)
+print(normalidade_multivariada)
+```
+
+DADOS AUSENTES
+
+## Fase 1.5: Diagnóstico de Dados Ausentes (Missing Values)
+
+A análise de dados ausentes é conduzida para determinar a viabilidade de técnicas de imputação múltipla ou estimação por máxima verossimilhança com informação completa (FIML) em etapas posteriores.
+
+```{r analise-missing}
+# Instalação (se necessário) e carregamento de pacotes específicos
+pacotes_missing <- c("naniar", "VIM", "tidyverse")
+lapply(pacotes_missing, require, character.only = TRUE)
+
+# Assume-se que o objeto df_escala (contendo apenas os itens do instrumento) já está carregado
+
+# 1. Quantificação Absoluta e Relativa
+# Gera um sumário com o número de observações ausentes (n_miss) e a porcentagem (pct_miss) por variável
+sumario_ausentes <- miss_var_summary(df_escala)
+print("Sumário de Variáveis com Dados Ausentes:")
+print(sumario_ausentes)
+
+# 2. Visualização do Padrão de Ausência
+# O gráfico 'aggr' fornece a proporção de NAs e ilustra combinações de ausência simultânea entre variáveis
+grafico_padrao_na <- VIM::aggr(df_escala, 
+                               col = c('navyblue', 'red'), 
+                               numbers = TRUE, 
+                               sortVars = TRUE, 
+                               labels = names(df_escala), 
+                               cex.axis = .7, 
+                               gap = 3, 
+                               ylab = c("Proporção de Missing", "Padrão Combinado de Missing"))
+
+# 3. Teste de Mecanismo de Perda (Teste MCAR de Little)
+# Avalia a hipótese nula (H0) de que os dados são Ausentes Completamente ao Acaso (MCAR).
+# Um p-valor > 0.05 falha em rejeitar H0, sugerindo que a perda de dados é estocástica.
+teste_little <- mcar_test(df_escala)
+print("Resultado do Teste MCAR de Little:")
+print(teste_little)
+```
+ANÁLISE FATORIAL EXPLORATÓRIA
+
+```{r exploratória}
+# Instalação e carregamento dos pacotes necessários
+# install.packages("psych")
+# install.packages("dplyr")
+
+library(psych)
+library(dplyr)
+
+# 1. Preparação do Banco de Dados
+# Certifique-se de que df_escala contenha exclusivamente os 14 itens (q01 a q14_rev)
+df_efa <- df_escala %>% 
+  mutate(across(everything(), as.numeric))
+
+# 2. Análise Paralela para Retenção Fatorial
+# Estima o número de fatores comparando os autovalores empíricos com autovalores simulados ao acaso.
+# O argumento cor = "poly" garante o tratamento adequado da natureza ordinal.
+set.seed(123) # Reprodutibilidade das simulações
+analise_paralela <- fa.parallel(df_efa, 
+                                cor = "poly", 
+                                fm = "wls",    # Mínimos Quadrados Ponderados
+                                fa = "fa",     # Restringe o output apenas à análise de fatores
+                                n.iter = 500,  # Número de matrizes aleatórias simuladas
+                                main = "Análise Paralela - Matriz Policórica")
+
+# O console reportará o número sugerido de fatores. 
+
+# 3. Estimação da Matriz de Correlação Policórica
+matriz_poli <- polychoric(df_efa)$rho
+
+# 4. Análise Fatorial Exploratória (AFE)
+# Ajuste o parâmetro 'nfactors' conforme o output empírico da Análise Paralela.
+# Mantido nfactors = 5 para alinhamento com a dimensionalidade teórica testada anteriormente.
+modelo_afe <- fa(r = matriz_poli, 
+                 n.obs = nrow(df_efa), 
+                 nfactors = 5, 
+                 rotate = "oblimin", # Rotação oblíqua devido à correlação esperada entre os fatores
+                 fm = "wls")         # Estimador adequado para violações de normalidade multivariada
+
+# 5. Visualização das Cargas Fatoriais e Índices de Ajuste
+# O argumento 'cut = 0.3' omite cargas residuais inferiores a 0.30 para clareza visual.
+print(modelo_afe, cut = 0.3, sort = TRUE)
+
+```
+
+
+
+EVIDÊNCIAS DE VALIDADE - ESTRUTURA INTERNA
+
+```{r confirmatoria}
+# 2.1 Especificação do Modelo Pentafatorial
+modelo_penta <- '
+  # Modelagem das Variáveis Latentes
+  realidade =~ q01 + q02_rev + q03_rev
+  causas    =~ q04 + q05 + q06
+  valencia  =~ q07 + q08 + q09
+  espacial  =~ q10 + q11 + q12
+  temporal  =~ q13_rev + q14_rev
+'
+
+# 2.2 Estimação do Modelo
+fit_cfa <- cfa(model = modelo_penta, 
+               data = df_escala, 
+               ordered = names(df_escala), # Declara a natureza ordinal dos itens
+               estimator = "WLSMV",
+               bounds = TRUE)
+
+# 2.3 Extração dos Índices de Ajuste
+# Valores de referência: CFI/TLI > .95, RMSEA < .06, SRMR < .08
+summary(fit_cfa, fit.measures = TRUE, standardized = TRUE, rsquare = TRUE)
+
+# Inspeção Univariada de Frequências (Efeito Teto/Chão)
+library(tidyverse)
+
+# Constrói uma tabela com o percentual de escolha para cada nota (1 a 7) por item
+tabela_frequencias <- df_escala %>%
+  pivot_longer(cols = everything(), names_to = "Item", values_to = "Resposta") %>%
+  count(Item, Resposta) %>%
+  group_by(Item) %>%
+  mutate(Percentual = round(n / sum(n) * 100, 2)) %>%
+  select(-n) %>%
+  pivot_wider(names_from = Resposta, values_from = Percentual, values_fill = 0)
+
+# Exibe a tabela no console
+print(tabela_frequencias, n = Inf)
+
+# (Opcional) Visualização gráfica da distribuição de respostas para o fator Realidade
+df_escala %>%
+  select(q01, q02_rev, q03_rev) %>%
+  pivot_longer(cols = everything(), names_to = "Item", values_to = "Resposta") %>%
+  ggplot(aes(x = as.factor(Resposta))) +
+  geom_bar(fill = "steelblue", color = "black") +
+  facet_wrap(~ Item, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Distribuição de Frequências: Fator Realidade",
+       x = "Opção de Resposta (1 a 7)",
+       y = "Frequência Absoluta")
+```
+
+```{r CFAsemitemtres}
+# Especificação do Modelo Ajustado (Alinhado ao Estudo 3 do artigo original)
+modelo_ajustado <- '
+  # Fator Realidade reduzido para 2 itens (remoção do q03_rev por redundância)
+  realidade =~ q01 + q02_rev 
+  causas    =~ q04 + q05 + q06
+  valencia  =~ q07 + q08 + q09
+  espacial  =~ q10 + q11 + q12
+  temporal  =~ q13_rev + q14_rev
+'
+
+# Reestimação da CFA
+fit_cfa_ajustado <- cfa(model = modelo_ajustado, 
+                        data = df_escala, 
+                        ordered = names(df_escala), 
+                        estimator = "WLSMV")
+
+# Avaliação dos novos índices de ajuste
+summary(fit_cfa_ajustado, fit.measures = TRUE, standardized = TRUE)
+
+```
+
+
+```{r CFABayesiana}
+
+#install.packages("blavaan")
+library(blavaan)
+
+# 2.4 Análise Fatorial Confirmatória Bayesiana (BCFA)
+# Implementada como contingência caso o modelo frequentista apresente ajuste subótimo
+# O estimador Bayesiano lida melhor com cross-loadings espúrios
+fit_bcfa <- bcfa(model = modelo_penta, 
+                 data = df_escala,           # Utilize o dataframe tratado
+                 ordered = names(df_escala),
+                 target = "stan",                 # Utilização do amostrador Stan (recomendado)
+                 test = "standard",               # Habilita o cômputo das estatísticas de teste
+                 bcontrol = list(cores = 3))      # Otimização via processamento paralelo (opcional)
+
+summary(fit_bcfa, standardized = TRUE)
+
+# Calcula os índices de ajuste específicos para modelos bayesianos (BRMSEA, BCFI, BTLI)
+#ajuste_bayesiano <- blavFitIndices(fit_bcfa)
+
+# Exibe o sumário dos índices
+#summary(ajuste_bayesiano)
+```
+
+FIGURA AFC
+```{r figuraAFC}
+# Instalação do pacote (se necessário, execute apenas uma vez no console)
+
+#install.packages("semPlot")
+library(semPlot)
+
+# Geração do Diagrama de Caminhos da CFA
+semPaths(fit_cfa, 
+         what = "std",               # Determina que as arestas representem os valores padronizados
+         whatLabels = "std",         # Insere os valores das cargas padronizadas nos rótulos das setas
+         layout = "tree2",           # Layout estruturado em árvore (ideal para modelos de medida)
+         rotation = 2,               # Rotaciona a figura (1 = latentes embaixo, 2 = esquerda, etc.)
+         nCharNodes = 0,             # Previne o truncamento e exibe o nome completo das variáveis
+         sizeMan = 7,                # Ajusta o tamanho dos retângulos (itens observados)
+         sizeLat = 9,                # Ajusta o tamanho das elipses (fatores latentes)
+         edge.label.cex = 0.9,       # Ajusta o tamanho da fonte dos valores nas setas
+         fade = FALSE,               # Desativa o efeito de desbotamento em cargas mais fracas
+         intercepts = FALSE,         # Oculta interceptos para deixar o gráfico mais limpo
+         residuals = TRUE,           # Exibe as setas de variância residual
+         curvePivot = TRUE,          # Arredonda as setas de covariância entre os fatores
+         color = list(lat = "lightgrey", man = "white"), # Cores sóbrias para publicação científica
+         mar = c(3, 5, 3, 5))        # Ajuste das margens do gráfico (baixo, esquerda, cima, direita)
+
+# Exportando a figura em alta resolução (PNG)
+#png("cfa_diagrama.png", width = 3000, height = 2400, res = 300)
+
+semPaths(fit_cfa, 
+         what = "path",              # Desativa a espessura variável das linhas
+         whatLabels = "std",         # Mantém os valores numéricos padronizados
+         layout = "tree2",           # Alinha os itens observados em uma coluna estrita
+         rotation = 2,               # Fatores à esquerda, itens à direita
+         style = "lisrel",           # Setas retilíneas
+         
+         # Controle de Linhas e Cores (Substituição do Tracejado e Cores)
+         fixedStyle = 1,             # Força linha contínua para o primeiro item (remove tracejado)
+         freeStyle = 1,              # Força linha contínua para os demais
+         edge.color = "black",       # Todas as setas estritamente pretas
+         
+         # Otimização Numérica (Rótulos)
+         edge.label.cex = 0.8,       # Escala da fonte adequada para leitura
+         edge.label.bg = "white",    # Fundo branco sob os números
+         
+         # Estrutura dos Nós
+         sizeMan = 5,                # Tamanho moderado dos itens (quadrados)
+         sizeLat = 7,                # Tamanho moderado dos fatores (elipses)
+         shapeLat = "ellipse",
+         shapeMan = "rectangle",
+         
+         # Elementos Adicionais
+         residuals = TRUE,           # Exibe setas de resíduos apontando para os itens
+         intercepts = FALSE,         # Oculta triângulos de interceptos
+         fade = FALSE,               # Desativa transparência baseada em magnitude
+         nCharNodes = 0,             # Previne truncamento dos nomes
+         curvePivot = TRUE,          # Arredonda setas de covariância à esquerda
+         mar = c(2, 6, 2, 6))        # Expande as margens laterais
+
+#dev.off() # Encerra o dispositivo de plotagem e salva o arquivo no diretório
+
+#FIGURA COM BASE NA ANÁLISE CONFIRMATÓRIA BAYESIANA
+
+library(semPlot)
+
+# Renderização do diagrama baseado no modelo Bayesiano (DPI = 300)
+#png("cfa_diagrama_bayesiano.png", width = 2500, height = 3500, res = 300)
+
+semPaths(fit_bcfa,             
+         what = "path",              
+         whatLabels = "std",         
+         layout = "tree2",           
+         rotation = 2,               
+         style = "lisrel",           
+         
+         # Controle de Linhas e Cores
+         fixedStyle = 1,             
+         freeStyle = 1,              
+         edge.color = "black",       
+         
+         # Otimização Numérica e Limpeza de Artefatos
+         edge.label.cex = 0.8,       
+         edge.label.bg = "white",    
+         thresholds = FALSE,         # Suprime as barras de limiares dentro dos itens
+         residScale = 1.5,           # Alonga as setas de erro em 50% para afastar os números da borda
+         
+         # Estrutura dos Nós
+         sizeMan = 5,                
+         sizeLat = 7,                
+         shapeLat = "ellipse",
+         shapeMan = "rectangle",
+         
+         # Elementos Adicionais
+         residuals = TRUE,           
+         intercepts = FALSE,         
+         fade = FALSE,               
+         nCharNodes = 0,             
+         curvePivot = TRUE,          
+         mar = c(2, 7, 2, 7))        # Margens laterais expandidas para acomodar os resíduos      
+
+#dev.off()
+
+```
+
+ANÁLISE DE INVARIÂNCIA
+
+```{r invariancia}
+library(dplyr)
+library(lavaan)
+
+# 1. Agrupamento de categorias (Collapsing) para o item q01
+df_invariancia <- bind_cols(df_escala, sexo = df$sexo) %>%
+  filter(sexo %in% c("Feminino", "Masculino")) %>% 
+  mutate(across(-sexo, as.numeric)) %>%
+  mutate(
+    q01 = case_when(
+      q01 <= 3 ~ 3,  
+      q01 >= 6 ~ 6,  
+      TRUE ~ q01
+    ),
+    q02_rev = case_when(
+      q02_rev >= 4 ~ 4,  
+      TRUE ~ q02_rev
+    ),
+    q03_rev = case_when(
+      q03_rev >= 3 ~ 3,  
+      TRUE ~ q03_rev
+    ),
+    q07 = case_when(
+      q07 <= 3 ~ 3,  
+      TRUE ~ q07
+    ),
+    q08 = case_when(
+      q08 <= 3 ~ 3,  # Agrupa as categorias 6 e 7
+      TRUE ~ q08
+),
+    q09 = case_when(
+      q09 <= 4 ~ 4,  # Agrupa as categorias 1, 2, 3 e 4 para sanar as células nulas
+      TRUE ~ q09
+    )
+)
+
+
+# 2. Definição explícita do vetor de variáveis ordinais
+variaveis_ordinais <- names(df_escala)
+
+# 3. Estimação do Modelo Configuracional (Invariância de Configuração)
+fit_config <- cfa(model = modelo_penta, 
+                  data = df_invariancia, 
+                  ordered = variaveis_ordinais, 
+                  group = "sexo", 
+                  estimator = "WLSMV",
+                  bounds = TRUE) # Manutenção do controle de Heywood cases
+
+# 4. Invariância Métrica/Escalar (Cargas e thresholds restritos)
+# Nota metodológica: No estimador WLSMV com dados ordinais, a restrição simultânea 
+# de cargas e limiares (thresholds) testa a invariância forte diretamente.
+fit_metric <- cfa(modelo_penta, 
+                  data = df_invariancia, 
+                  ordered = names(df_escala), 
+                  group = "sexo", 
+                  estimator = "WLSMV", 
+                  group.equal = c("loadings", "thresholds"),
+                  bounds = TRUE)
+
+
+# 5. Avaliação do Ajuste Configuracional
+summary(fit_config, fit.measures = TRUE, standardized = TRUE)
+
+anova(fit_config, fit_metric)
+
+
+
+```
+
+
+CONSISTÊNCIA INTERNA
+
+```{r consistencia}
+
+# Extração da fidedignidade via pacote semTools
+# Calcula automaticamente Alpha, Ômega (total e por subescala) e AVE (Variância Média Extraída)
+fidedignidade_indices <- semTools::reliability(fit_cfa)
+print(fidedignidade_indices)
+```
+
+ANÁLISE DE REDES
+
+```{r redes}
+# 5.1 Estimação da Rede (Matriz Policórica automática via cor_auto)
+
+library(qgraph)
+
+matriz_cor <- cor_auto(df_escala)
+rede_clima <- EBICglasso(matriz_cor, n = nrow(df_escala))
+
+# 5.2 Plotagem do Grafo Psicométrico
+qgraph(rede_clima, 
+       layout = "spring", 
+       groups = list(Realidade = 1:3, Causas = 4:6, Valencia = 7:9, 
+                     Espacial = 10:12, Temporal = 13:14),
+       theme = "colorblind", 
+       vsize = 6, 
+       title = "Rede Psicométrica de Percepção Climática")
+
+# 5.3 Análise de Centralidade
+centralidade <- centralityPlot(rede_clima, include = c("Strength", "Betweenness", "Closeness"))
+
+```
+
+VALIDADE EXTERNA
+
+```{r externa}
+# 6.1 Ampliação do Modelo Estrutural (Exemplo com 'import_tema')
+# Necessário que a variável 'import_tema' conste no banco e seja numérica/ordinal
+modelo_estrutural <- '
+  # Modelo de Medida (CFA)
+  realidade =~ q01 + q02_rev + q03_rev
+  causas    =~ q04 + q05 + q06
+  valencia  =~ q07 + q08 + q09
+  espacial  =~ q10 + q11 + q12
+  temporal  =~ q13_rev + q14_rev
+
+  # Regressões Estruturais (Validade Preditiva)
+  # A percepção de valência e realidade predizem a importância atribuída ao tema?
+  import_tema ~ realidade + valencia + causas
+'
+
+# Estimação do Modelo Estrutural
+# df_completo deve conter os itens da escala e a variável 'import_tema'
+df_completo <- bind_cols(df_escala, import_tema = df$import_tema)
+
+fit_sem <- sem(model = modelo_estrutural, 
+               data = df_completo, 
+               ordered = names(df_escala), # import_tema pode ser incluído se for ordinal
+               estimator = "WLSMV")
+
+summary(fit_sem, standardized = TRUE, rsquare = TRUE)
+```
+
